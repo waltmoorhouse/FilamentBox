@@ -1,13 +1,19 @@
 #include <TimerOne.h>
+#include <TimerThree.h>
 #include <DHT.h>
 #include <DHT_U.h>
 #include <HX711.h>
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
+#include <ClickEncoder.h>
+
+// Comment out to run with actual hardware
+#define MOCK_MODE true
 
 #define COMMAND_MAX_SIZE 25
 
 #define DHTTYPE       DHT22
+
 #define DHTPIN        2
 #define HEATER        3
 #define SCALE1_DOUT   4
@@ -19,55 +25,112 @@
 #define SCALE4_DOUT   10
 #define SCALE4_CLK    11
 
-//define LCD_SDA A4
-//define LCD_SCL A5
-#define LCD_LINES   4
-#define LCD_CHARS   20
+#define ROT1_CLK      A1
+#define ROT1_DT       A0
+#define ROT1_SW       A2
+#define ROT2_CLK      A3
+#define ROT2_DT       A6
+#define ROT2_SW       A7
+#define ROT3_CLK      A8
+#define ROT3_DT       A10
+#define ROT3_SW       A9
+#define ROT4_CLK      A11
+#define ROT4_DT       A13
+#define ROT4_SW       A12
 
-HX711 scale1;
-HX711 scale2;
-HX711 scale3;
-HX711 scale4;
+#define LCD_SDA       A4
+#define LCD_SCL       A5
+#define LCD_LINES     4
+#define LCD_CHARS     20
 
-DHT dht(DHTPIN, DHTTYPE);
-LiquidCrystal_I2C lcd(0x27, LCD_CHARS, LCD_LINES);
+#ifndef MOCK_MODE
+  HX711 scale1;
+  HX711 scale2;
+  HX711 scale3;
+  HX711 scale4;
+  
+  ClickEncoder *encoder1;
+  ClickEncoder *encoder2;
+  ClickEncoder *encoder3;
+  ClickEncoder *encoder4;
+  
+  DHT dht(DHTPIN, DHTTYPE);
+  LiquidCrystal_I2C lcd(0x27, LCD_CHARS, LCD_LINES);
+#endif
 
 const int READINGS_PER_SECOND = 1;
 int maxHumidity = 5;
 int maxTemp = 80;
 
-//These values obtained by using the SparkFun_HX711_Calibration sketch
-float scale1_calibration_factor = -7050;
-float scale2_calibration_factor = -7050;
-float scale3_calibration_factor = -7050;
-float scale4_calibration_factor = -7050;
+#ifndef MOCK_MODE
+  //These values obtained by using the SparkFun_HX711_Calibration sketch
+  float scale1_calibration_factor = -7050;
+  float scale2_calibration_factor = -7050;
+  float scale3_calibration_factor = -7050;
+  float scale4_calibration_factor = -7050;
+  
+  float l1 = 0.00;
+  float l2 = 0.00;
+  float l3 = 0.00;
+  float l4 = 0.00;
+#else
+  float w1 = 1.23;
+  float w2 = 2.34;
+  float w3 = 3.45;
+  float w4 = 4.56;
+  
+  float l1 = 100.12;
+  float l2 = 50.34;
+  float l3 = 75.56;
+  float l4 = 150.78;
+#endif
 
 bool heaterPowerOn = true;
 bool toggle = true;
 
+#ifndef MOCK_MODE
+  void timerIsr() {
+    encoder1->service();
+    encoder2->service();
+    encoder3->service();
+    encoder4->service();
+  }
+#endif
+
 void setup() {
   Serial.begin(115200);
-  pinMode(HEATER, OUTPUT);
-  dht.begin();
+
+  #ifndef MOCK_MODE
+    pinMode(HEATER, OUTPUT);
+    dht.begin();
+    
+    scale1.begin(SCALE1_DOUT, SCALE1_CLK);
+    scale1.set_scale(scale1_calibration_factor); 
+    scale1.tare();
+    
+    scale2.begin(SCALE2_DOUT, SCALE2_CLK);
+    scale2.set_scale(scale2_calibration_factor);
+    scale2.tare();
+    
+    scale3.begin(SCALE3_DOUT, SCALE3_CLK);
+    scale3.set_scale(scale3_calibration_factor);
+    scale3.tare();
+    
+    scale4.begin(SCALE4_DOUT, SCALE4_CLK);
+    scale4.set_scale(scale4_calibration_factor);
+    scale4.tare();
+
+    encoder1 = new ClickEncoder(ROT1_CLK, ROT1_DT, ROT1_SW);
+    encoder2 = new ClickEncoder(ROT2_CLK, ROT2_DT, ROT2_SW);
+    encoder3 = new ClickEncoder(ROT3_CLK, ROT3_DT, ROT3_SW);
+    encoder4 = new ClickEncoder(ROT4_CLK, ROT4_DT, ROT4_SW);
+    
+    Timer1.initialize(1000);
+    Timer1.attachInterrupt(timerIsr); 
+  #endif
   
-  scale1.begin(SCALE1_DOUT, SCALE1_CLK);
-  scale1.set_scale(scale1_calibration_factor); 
-  scale1.tare();
-  
-  scale2.begin(SCALE2_DOUT, SCALE2_CLK);
-  scale2.set_scale(scale2_calibration_factor);
-  scale2.tare();
-  
-  scale3.begin(SCALE3_DOUT, SCALE3_CLK);
-  scale3.set_scale(scale3_calibration_factor);
-  scale3.tare();
-  
-  scale4.begin(SCALE4_DOUT, SCALE4_CLK);
-  scale4.set_scale(scale4_calibration_factor);
-  scale4.tare();
-  
-  Timer1.initialize(1000000/READINGS_PER_SECOND);
-  Timer1.attachInterrupt(report);
+  Timer3.initialize(1000000/READINGS_PER_SECOND);
+  Timer3.attachInterrupt(report);
 }
 
 void loop() {
@@ -105,15 +168,38 @@ void loop() {
         // Get the next part
         command = strtok(0, " ");
         if (strcmp(command, "1") == 0) {
-          scale1.tare();
+          #ifndef MOCK_MODE
+            scale1.tare();
+          #endif
         } else if (strcmp(command, "2") == 0) {
-          scale2.tare();
+          #ifndef MOCK_MODE
+            scale2.tare();
+          #endif
         } else if (strcmp(command, "3") == 0) {
-          scale3.tare();
+          #ifndef MOCK_MODE
+            scale3.tare();
+          #endif
         } else if (strcmp(command, "4") == 0) {
-          scale4.tare();
+          #ifndef MOCK_MODE
+            scale4.tare();
+          #endif
         } else {
           Serial.print(F("ERROR: Bad Scale Number: "));
+          Serial.println(command);
+        }
+      } else if (strcmp(command, "ZERO") == 0) {
+        // Get the next part
+        command = strtok(0, " ");
+        if (strcmp(command, "1") == 0) {
+          l1 = 0.00;
+        } else if (strcmp(command, "2") == 0) {
+          l2 = 0.00;
+        } else if (strcmp(command, "3") == 0) {
+          l3 = 0.00;
+        } else if (strcmp(command, "4") == 0) {
+          l4 = 0.00;
+        } else {
+          Serial.print(F("ERROR: Bad Encoder Number: "));
           Serial.println(command);
         }
       } else {
@@ -124,13 +210,17 @@ void loop() {
   }
 }
 
-
 void report(void) {
   // Reading temperature or humidity takes about 250 milliseconds!
   // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  float h = dht.readHumidity();
-  // Read temperature as Celsius
-  float t = dht.readTemperature();
+  #ifndef MOCK_MODE
+    float h = dht.readHumidity();
+    // Read temperature as Celsius
+    float t = dht.readTemperature();
+  #else
+    float h = 15.123;
+    float t = 42.536;
+  #endif
   
   // Check if any reads failed and exit early (to try again).
   if (isnan(h) || isnan(t)) {
@@ -139,26 +229,37 @@ void report(void) {
   }
 
   if (t > maxTemp) {
-    digitalWrite(HEATER, LOW);
     heaterPowerOn = false;
-    lcd.noBacklight();
+    #ifndef MOCK_MODE
+      digitalWrite(HEATER, LOW);
+      lcd.noBacklight();
+    #endif
   } else {
     if (h > maxHumidity) {
-      digitalWrite(HEATER, HIGH);
       heaterPowerOn = true;
-      lcd.backlight();
+      #ifndef MOCK_MODE
+        digitalWrite(HEATER, HIGH);
+        lcd.backlight();
+      #endif
     }
   }
-
-  float w1 = scale1.get_units();
-  float w2 = scale2.get_units();
-  float w3 = scale3.get_units();
-  float w4 = scale4.get_units();
+  
+  #ifndef MOCK_MODE
+    float w1 = scale1.get_units();
+    float w2 = scale2.get_units();
+    float w3 = scale3.get_units();
+    float w4 = scale4.get_units();
+      
+    l1 += encoder1->getValue();
+    l2 += encoder2->getValue();
+    l3 += encoder3->getValue();
+    l4 += encoder4->getValue();
+  #endif
 
   // Report to Serial
-  Serial.print(F("H:")); 
+  Serial.print(F("H:"));
   Serial.print(h);
-  Serial.print(F("% T:")); 
+  Serial.print(F("% T:"));
   Serial.print(t);
   Serial.print(F("C S1:"));
   Serial.print(w1);
@@ -168,40 +269,51 @@ void report(void) {
   Serial.print(w3);
   Serial.print(F("kg S4:"));
   Serial.print(w4);
-  Serial.print(F("kg P:"));
+  Serial.print(F("kg L1:"));
+  Serial.print(l1);
+  Serial.print(F("mm L2:"));
+  Serial.print(l2);
+  Serial.print(F("mm L3:"));
+  Serial.print(l3);
+  Serial.print(F("mm L4:"));
+  Serial.print(l4);
+  Serial.print(F("mm P:"));
   if (heaterPowerOn) {
     Serial.println(F("ON"));
   } else {
     Serial.println(F("OFF"));
   }
 
-  // update LCD
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(F("Humidity: "));
-  lcd.print(h);
-  lcd.print(F("%"));
-  lcd.setCursor(0, 1);
-  lcd.print(F("Temp: "));
-  lcd.print(t);
-  lcd.print(F(" C"));
-  lcd.setCursor(0, 2);
-  if (toggle) {
-    lcd.print(F("Spool 1: "));
-    lcd.print(w1);
-    lcd.print(F("kg"));
-    lcd.setCursor(0, 3);
-    lcd.print(F("Spool 2: "));
-    lcd.print(w2);
-    lcd.print(F("kg"));
-  } else {
-    lcd.print(F("Spool 3: "));
-    lcd.print(w3);
-    lcd.print(F("kg"));
-    lcd.setCursor(0, 3);
-    lcd.print(F("Spool 4: "));
-    lcd.print(w4);
-    lcd.print(F("kg"));
-  }
+
+  #ifndef MOCK_MODE
+    // update LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Humidity: "));
+    lcd.print(h);
+    lcd.print(F("%"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Temp: "));
+    lcd.print(t);
+    lcd.print(F(" C"));
+    lcd.setCursor(0, 2);
+    if (toggle) {
+      lcd.print(F("Spool 1: "));
+      lcd.print(w1);
+      lcd.print(F("kg"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("Spool 2: "));
+      lcd.print(w2);
+      lcd.print(F("kg"));
+    } else {
+      lcd.print(F("Spool 3: "));
+      lcd.print(w3);
+      lcd.print(F("kg"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("Spool 4: "));
+      lcd.print(w4);
+      lcd.print(F("kg"));
+    }
+  #endif
   toggle = !toggle;
 }
