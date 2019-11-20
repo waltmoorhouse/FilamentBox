@@ -1,49 +1,58 @@
+/**
+ * FilamentBox Arduino code by Walt Moorhouse.
+ * MOCK_MODE is for testing changes to the logic without having to connect all the sensor. It can be run on an Uno or a Mega.
+ * You must have a Mega to run with actual hardware.
+ */
 #include <TimerOne.h>
-#include <TimerThree.h>
-#include <DHT.h>
-#include <DHT_U.h>
-#include <HX711.h>
-#include <Wire.h> 
-#include <LiquidCrystal_I2C.h>
-#include <ClickEncoder.h>
 
 // Comment out to run with actual hardware
 #define MOCK_MODE true
 
 #define COMMAND_MAX_SIZE 25
 
-#define DHTTYPE       DHT22
-
-#define DHTPIN        2
-#define HEATER        3
-#define SCALE1_DOUT   4
-#define SCALE1_CLK    5
-#define SCALE2_DOUT   6
-#define SCALE2_CLK    7
-#define SCALE3_DOUT   8
-#define SCALE3_CLK    9
-#define SCALE4_DOUT   10
-#define SCALE4_CLK    11
-
-#define ROT1_CLK      A1
-#define ROT1_DT       A0
-#define ROT1_SW       A2
-#define ROT2_CLK      A3
-#define ROT2_DT       A6
-#define ROT2_SW       A7
-#define ROT3_CLK      A8
-#define ROT3_DT       A10
-#define ROT3_SW       A9
-#define ROT4_CLK      A11
-#define ROT4_DT       A13
-#define ROT4_SW       A12
-
-#define LCD_SDA       A4
-#define LCD_SCL       A5
-#define LCD_LINES     4
-#define LCD_CHARS     20
-
 #ifndef MOCK_MODE
+  #include <TimerThree.h>
+  #include <DHT.h>
+  #include <DHT_U.h>
+  #include <HX711.h>
+  #include <Wire.h> 
+  #include <LiquidCrystal_I2C.h>
+  #include <ClickEncoder.h>
+  
+  #define DHTTYPE       DHT22
+  
+  #define DHTPIN        2
+  #define HEATER        3
+  #define SCALE1_DOUT   4
+  #define SCALE1_CLK    5
+  #define SCALE2_DOUT   6
+  #define SCALE2_CLK    7
+  #define SCALE3_DOUT   8
+  #define SCALE3_CLK    9
+  #define SCALE4_DOUT   10
+  #define SCALE4_CLK    11
+  
+  #define ROT1_DT       A0
+  #define ROT1_CLK      A1
+  #define ROT1_SW       20
+  
+  #define ROT2_DT       A2
+  #define ROT2_CLK      A3
+  #define ROT2_SW       22
+  
+  #define ROT3_DT       A6
+  #define ROT3_CLK      A7
+  #define ROT3_SW       24
+  
+  #define ROT4_DT       A8
+  #define ROT4_CLK      A9
+  #define ROT4_SW       26
+  
+  #define LCD_SDA       A4
+  #define LCD_SCL       A5
+  #define LCD_LINES     4
+  #define LCD_CHARS     20
+
   HX711 scale1;
   HX711 scale2;
   HX711 scale3;
@@ -62,13 +71,12 @@ const int READINGS_PER_SECOND = 1;
 int maxHumidity = 5;
 int maxTemp = 80;
 
+float scale1_calibration_factor = 0;
+float scale2_calibration_factor = 0;
+float scale3_calibration_factor = 0;
+float scale4_calibration_factor = 0;
+
 #ifndef MOCK_MODE
-  //These values obtained by using the SparkFun_HX711_Calibration sketch
-  float scale1_calibration_factor = -7050;
-  float scale2_calibration_factor = -7050;
-  float scale3_calibration_factor = -7050;
-  float scale4_calibration_factor = -7050;
-  
   float l1 = 0.00;
   float l2 = 0.00;
   float l3 = 0.00;
@@ -87,6 +95,7 @@ int maxTemp = 80;
 
 bool heaterPowerOn = true;
 bool toggle = true;
+bool writingToSerial = false;
 
 #ifndef MOCK_MODE
   void timerIsr() {
@@ -124,16 +133,38 @@ void setup() {
     encoder2 = new ClickEncoder(ROT2_CLK, ROT2_DT, ROT2_SW);
     encoder3 = new ClickEncoder(ROT3_CLK, ROT3_DT, ROT3_SW);
     encoder4 = new ClickEncoder(ROT4_CLK, ROT4_DT, ROT4_SW);
+    encoder1->setAccelerationEnabled(false);
+    encoder3->setAccelerationEnabled(false);
+    encoder3->setAccelerationEnabled(false);
+    encoder4->setAccelerationEnabled(false);
     
-    Timer1.initialize(1000);
-    Timer1.attachInterrupt(timerIsr); 
+    Timer3.initialize(1000);
+    Timer3.attachInterrupt(timerIsr); 
   #endif
   
-  Timer3.initialize(1000000/READINGS_PER_SECOND);
-  Timer3.attachInterrupt(report);
+  Timer1.initialize(1000000/READINGS_PER_SECOND);
+  Timer1.attachInterrupt(report);
 }
 
 void loop() {
+  #ifndef MOCK_MODE
+    ClickEncoder::Button b1 = encoder1->getButton();
+    if (b1 == ClickEncoder::DoubleClicked) {
+      scale1.tare();
+    }
+    ClickEncoder::Button b2 = encoder2->getButton();
+    if (b2 == ClickEncoder::DoubleClicked) {
+      scale2.tare();
+    }
+    ClickEncoder::Button b3 = encoder3->getButton();
+    if (b3 == ClickEncoder::DoubleClicked) {
+      scale3.tare();
+    }
+    ClickEncoder::Button b4 = encoder4->getButton();
+    if (b4 == ClickEncoder::DoubleClicked) {
+      scale4.tare();
+    }
+  #endif
   if (Serial.available() > 0) {
     char input[COMMAND_MAX_SIZE + 1];
     // Get next command from Serial (add 1 for final 0)
@@ -160,8 +191,7 @@ void loop() {
           } else if  (strcmp(setting, "H") == 0) {
             maxHumidity = newValue;
           } else {
-            Serial.print(F("ERROR: Bad Setting: "));
-            Serial.println(setting);
+            safeWrite(F("ERROR: Bad Setting: "), setting);
           }
         }
       } else if (strcmp(command, "TARE") == 0) {
@@ -184,8 +214,7 @@ void loop() {
             scale4.tare();
           #endif
         } else {
-          Serial.print(F("ERROR: Bad Scale Number: "));
-          Serial.println(command);
+          safeWrite(F("ERROR: Bad Scale Number: "), command);
         }
       } else if (strcmp(command, "ZERO") == 0) {
         // Get the next part
@@ -199,14 +228,117 @@ void loop() {
         } else if (strcmp(command, "4") == 0) {
           l4 = 0.00;
         } else {
-          Serial.print(F("ERROR: Bad Encoder Number: "));
-          Serial.println(command);
+          safeWrite(F("ERROR: Bad Encoder Number: "), command);
+        }
+      } else if (strcmp(command, "CALI") == 0) {
+         command = strtok(0, " ");
+        // Split the command in two values
+        char* separator = strchr(command, '=');
+        if (separator != 0) {
+          *separator = 0;
+          calibrate(atoi(command), ++separator);
         }
       } else {
-        Serial.print(F("ERROR: Bad Command: "));
-        Serial.println(input);
+        safeWrite(F("ERROR: Bad Command: "), input);
       }
     }
+  }
+}
+
+void calibrate(int scaleNum, char* kg) {
+  Timer1.stop();
+  calibrationWrite(F("Entering calibration mode..."));
+  #ifndef MOCK_MODE
+    HX711 scale;
+    switch(scaleNum) {
+      case 1:
+        scale = scale1;
+        break;
+      case 2:
+        scale = scale2;
+        break;
+      case 3:
+        scale = scale3;
+        break;
+      case 4:
+        scale = scale4;
+        break;
+      default:
+         safeWrite(F("ERROR: Bad Scale: "), scaleNum);
+         Timer1.start();
+         return;
+    }
+    scale.set_scale();
+    scale.tare(); //Reset the scale to 0
+    long zero_factor = scale.read_average(); //Get a baseline reading
+  #else
+    long zero_factor = 0;
+  #endif
+  calibrationDataWrite(F("Zero Factor = "), zero_factor);
+  delay(1000);
+  char* answer = prompt(F("Place known weight of (kg) "), kg);
+  
+  if (strcmp(answer, "OK") != 0) {
+    if (strcmp(answer, "CANCEL") != 0) {
+      safeWrite(F("ERROR: Bad answer: "), answer);
+    }
+    calibrationWrite(F("Calibration canceled."));
+    Timer1.start();
+    return;
+  }
+  #ifndef MOCK_MODE
+    float targetKg = atof(kg);
+    scale.set_scale(getCalibrationValue(scaleNum));
+    float currentReading = scale.get_units();
+    while (currentReading != targetKg) {
+      float newVal;
+      if (currentReading < 0) {
+        newVal = getCalibrationValue(scaleNum) * -1.00;
+      } else {
+        if (currentReading < targetKg) {
+          newVal = getCalibrationValue(scaleNum) + 10;
+        } else {
+          newVal = getCalibrationValue(scaleNum) - 10;
+        }
+      }
+      setCalibrationValue(scaleNum, newVal);
+      scale.set_scale(newVal);
+      currentReading = scale.get_units();
+    }
+  #endif
+  calibrationWrite(F("Calibration complete."));
+  Timer1.start();
+}
+
+long getCalibrationValue(int scaleNum) {
+  switch(scaleNum) {
+    case 1:
+      return scale1_calibration_factor;
+    case 2:
+      return scale2_calibration_factor;
+    case 3:
+      return scale3_calibration_factor;
+    case 4:
+      return scale4_calibration_factor;
+    default:
+      return 0;
+  }
+}
+
+void setCalibrationValue(int scaleNum, float newValue) {
+  switch(scaleNum) {
+    case 1:
+      scale1_calibration_factor = newValue;
+      break;
+    case 2:
+      scale2_calibration_factor = newValue;
+      break;
+    case 3:
+      scale3_calibration_factor = newValue;
+      break;
+    case 4:
+      scale4_calibration_factor = newValue;
+      break;
   }
 }
 
@@ -257,6 +389,7 @@ void report(void) {
   #endif
 
   // Report to Serial
+  writingToSerial = true;
   Serial.print(F("H:"));
   Serial.print(h);
   Serial.print(F("% T:"));
@@ -283,7 +416,7 @@ void report(void) {
   } else {
     Serial.println(F("OFF"));
   }
-
+  writingToSerial = false;
 
   #ifndef MOCK_MODE
     // update LCD
@@ -316,4 +449,63 @@ void report(void) {
     }
   #endif
   toggle = !toggle;
+}
+
+char* prompt(const __FlashStringHelper* msg, char* data) {
+  writingToSerial = true;
+  Serial.print(F("PROMPT:"));
+  Serial.print(msg);
+  Serial.println(data);
+  writingToSerial = false;
+  
+  while (true) {
+    if (Serial.available() > 0) {
+      char input[COMMAND_MAX_SIZE + 1];
+      byte size = Serial.readBytes(input, COMMAND_MAX_SIZE);
+      input[size] = 0;
+      return strtok(input, " ");
+    }
+    delay(10);
+  }
+}
+
+void calibrationWrite(const __FlashStringHelper* msg) {
+  writingToSerial = true;
+  Serial.print(F("CALIBRATION:"));
+  Serial.print(scale1_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale2_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale3_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale4_calibration_factor);
+  Serial.print(F(":"));
+  Serial.println(msg);
+  writingToSerial = false;
+}
+
+void calibrationDataWrite(const __FlashStringHelper* msg, long data) {
+  writingToSerial = true;
+  Serial.print(F("CALIBRATION:"));
+  Serial.print(scale1_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale2_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale3_calibration_factor);
+  Serial.print(F(" "));
+  Serial.print(scale4_calibration_factor);
+  Serial.print(F(":"));
+  Serial.print(msg);
+  Serial.println(data);
+  writingToSerial = false;
+}
+
+void safeWrite(const __FlashStringHelper* msg, char* data) {
+  while (writingToSerial) {
+    delay(5);
+  }
+  writingToSerial = true;
+  Serial.print(msg);
+  Serial.println(data);
+  writingToSerial = false;
 }
