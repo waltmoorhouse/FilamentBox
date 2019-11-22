@@ -5,30 +5,38 @@
  */
 #include <TimerOne.h>
 
-// Comment out to run with actual hardware
-#define MOCK_MODE true
+// Comment out to run with actual hardware, unncomment to run in MOCK mode.
+// #define MOCK_MODE true
+// #define DEBUG_MODE true
 
 #define COMMAND_MAX_SIZE 25
+#define RESPONSE_MAX_SIZE 10
 
 #ifndef MOCK_MODE
-  #include <TimerThree.h>
+  #include <ClickEncoder.h>
   #include <DHT.h>
   #include <DHT_U.h>
   #include <HX711.h>
-  #include <Wire.h> 
   #include <LiquidCrystal_I2C.h>
-  #include <ClickEncoder.h>
-  
+  #include <SD.h>
+  #include <SPI.h>
+  #include <TimerThree.h>
+  #include <Wire.h>
+
   #define DHTTYPE       DHT22
   
   #define DHTPIN        2
   #define HEATER        3
+  
   #define SCALE1_DOUT   4
   #define SCALE1_CLK    5
+  
   #define SCALE2_DOUT   6
   #define SCALE2_CLK    7
+  
   #define SCALE3_DOUT   8
   #define SCALE3_CLK    9
+  
   #define SCALE4_DOUT   10
   #define SCALE4_CLK    11
   
@@ -53,6 +61,11 @@
   #define LCD_LINES     4
   #define LCD_CHARS     20
 
+  #define SD_MISO       50
+  #define SD_MOSI       51
+  #define SD_SCLK       52
+  #define SD_CS         53
+
   HX711 scale1;
   HX711 scale2;
   HX711 scale3;
@@ -65,16 +78,18 @@
   
   DHT dht(DHTPIN, DHTTYPE);
   LiquidCrystal_I2C lcd(0x27, LCD_CHARS, LCD_LINES);
+
 #endif
 
-const int READINGS_PER_SECOND = 1;
+const int READINGS_PER_MINUTE = 10;
+const char * SETTINGS_FILENAME = "settings.dat";
 int maxHumidity = 5;
 int maxTemp = 80;
 
-float scale1_calibration_factor = 0;
-float scale2_calibration_factor = 0;
-float scale3_calibration_factor = 0;
-float scale4_calibration_factor = 0;
+float scale1_calibration_factor = -700;
+float scale2_calibration_factor = -700;
+float scale3_calibration_factor = -700;
+float scale4_calibration_factor = -700;
 
 #ifndef MOCK_MODE
   float l1 = 0.00;
@@ -109,7 +124,12 @@ bool writingToSerial = false;
 void setup() {
   Serial.begin(115200);
 
-  #ifndef MOCK_MODE
+#ifndef MOCK_MODE
+    if (!SD.begin(SD_CS)) {
+      Serial.println(F("ERROR: Could not initialize SD Card!"));
+    }
+    loadCalibrationSettingsFromSd();
+  
     pinMode(HEATER, OUTPUT);
     dht.begin();
     
@@ -140,31 +160,37 @@ void setup() {
     
     Timer3.initialize(1000);
     Timer3.attachInterrupt(timerIsr); 
-  #endif
-  
-  Timer1.initialize(1000000/READINGS_PER_SECOND);
+#endif
+  Serial.println("Waiting on Sensors to warm up before beginning...");
+  delay(10000);
+  Timer1.initialize(60000000/READINGS_PER_MINUTE);
   Timer1.attachInterrupt(report);
 }
 
 void loop() {
-  #ifndef MOCK_MODE
+#ifndef MOCK_MODE  
+    l1 += encoder1->getValue();
+    l2 += encoder2->getValue();
+    l3 += encoder3->getValue();
+    l4 += encoder4->getValue();
+    
     ClickEncoder::Button b1 = encoder1->getButton();
     if (b1 == ClickEncoder::DoubleClicked) {
-      scale1.tare();
+      l1 = 0.00;
     }
     ClickEncoder::Button b2 = encoder2->getButton();
     if (b2 == ClickEncoder::DoubleClicked) {
-      scale2.tare();
+      l2 = 0.00;
     }
     ClickEncoder::Button b3 = encoder3->getButton();
     if (b3 == ClickEncoder::DoubleClicked) {
-      scale3.tare();
+      l3 = 0.00;
     }
     ClickEncoder::Button b4 = encoder4->getButton();
     if (b4 == ClickEncoder::DoubleClicked) {
-      scale4.tare();
+      l4 = 0.00;
     }
-  #endif
+#endif
   if (Serial.available() > 0) {
     char input[COMMAND_MAX_SIZE + 1];
     // Get next command from Serial (add 1 for final 0)
@@ -198,21 +224,21 @@ void loop() {
         // Get the next part
         command = strtok(0, " ");
         if (strcmp(command, "1") == 0) {
-          #ifndef MOCK_MODE
-            scale1.tare();
-          #endif
+#ifndef MOCK_MODE
+          scale1.tare();
+#endif
         } else if (strcmp(command, "2") == 0) {
-          #ifndef MOCK_MODE
-            scale2.tare();
-          #endif
+#ifndef MOCK_MODE
+          scale2.tare();
+#endif
         } else if (strcmp(command, "3") == 0) {
-          #ifndef MOCK_MODE
-            scale3.tare();
-          #endif
+#ifndef MOCK_MODE
+          scale3.tare();
+#endif
         } else if (strcmp(command, "4") == 0) {
-          #ifndef MOCK_MODE
-            scale4.tare();
-          #endif
+#ifndef MOCK_MODE
+          scale4.tare();
+#endif
         } else {
           safeWrite(F("ERROR: Bad Scale Number: "), command);
         }
@@ -231,13 +257,8 @@ void loop() {
           safeWrite(F("ERROR: Bad Encoder Number: "), command);
         }
       } else if (strcmp(command, "CALI") == 0) {
-         command = strtok(0, " ");
-        // Split the command in two values
-        char* separator = strchr(command, '=');
-        if (separator != 0) {
-          *separator = 0;
-          calibrate(atoi(command), ++separator);
-        }
+        command = strtok(0, " ");
+        calibrate(atoi(command));
       } else {
         safeWrite(F("ERROR: Bad Command: "), input);
       }
@@ -245,67 +266,182 @@ void loop() {
   }
 }
 
-void calibrate(int scaleNum, char* kg) {
+void report(void) {
+#ifdef DEBUG_MODE
+  Serial.println(F("DEBUG: Begin report"));
+#endif
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  #ifndef MOCK_MODE
+    float h = dht.readHumidity();
+    // Read temperature as Celsius
+    float t = dht.readTemperature();
+  #else
+    float h = 15.123;
+    float t = 42.536;
+  #endif
+  
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t)) {
+    Serial.println(F("ERROR: Failed to read from DHT sensor!"));
+    return;
+  }
+
+  if (t > maxTemp) {
+    heaterPowerOn = false;
+    #ifndef MOCK_MODE
+      digitalWrite(HEATER, HIGH);
+      lcd.noBacklight();
+    #endif
+  } else {
+    if (h > maxHumidity) {
+      heaterPowerOn = true;
+      #ifndef MOCK_MODE
+        digitalWrite(HEATER, LOW);
+        lcd.backlight();
+      #endif
+    }
+  }
+  
+  #ifndef MOCK_MODE
+    float w1 = scale1.get_units();
+    float w2 = scale2.get_units();
+    float w3 = scale3.get_units();
+    float w4 = scale4.get_units();
+  #endif
+
+  // Report to Serial
+  while (writingToSerial) {
+    delay(3);
+  }
+  writingToSerial = true;
+  Serial.print(F("H:"));
+  Serial.print(h);
+  Serial.print(F("% T:"));
+  Serial.print(t);
+  Serial.print(F("C S1:"));
+  Serial.print(w1);
+  Serial.print(F("kg S2:"));
+  Serial.print(w2);
+  Serial.print(F("kg S3:"));
+  Serial.print(w3);
+  Serial.print(F("kg S4:"));
+  Serial.print(w4);
+  Serial.print(F("kg L1:"));
+  Serial.print(l1);
+  Serial.print(F("mm L2:"));
+  Serial.print(l2);
+  Serial.print(F("mm L3:"));
+  Serial.print(l3);
+  Serial.print(F("mm L4:"));
+  Serial.print(l4);
+  Serial.print(F("mm P:"));
+  if (heaterPowerOn) {
+    Serial.println(F("ON"));
+  } else {
+    Serial.println(F("OFF"));
+  }
+  writingToSerial = false;
+
+#ifndef MOCK_MODE
+    // update LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Humidity: "));
+    lcd.print(h);
+    lcd.print(F("%"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Temp: "));
+    lcd.print(t);
+    lcd.print(F(" C"));
+    lcd.setCursor(0, 2);
+    if (toggle) {
+      lcd.print(F("Spool 1: "));
+      lcd.print(w1);
+      lcd.print(F("kg"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("Spool 2: "));
+      lcd.print(w2);
+      lcd.print(F("kg"));
+    } else {
+      lcd.print(F("Spool 3: "));
+      lcd.print(w3);
+      lcd.print(F("kg"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("Spool 4: "));
+      lcd.print(w4);
+      lcd.print(F("kg"));
+    }
+#endif
+  toggle = !toggle;
+  
+#ifdef DEBUG_MODE
+  Serial.println(F("DEBUG: End report"));
+#endif
+}
+
+void calibrate(int scaleNum) {
   Timer1.stop();
   calibrationWrite(F("Entering calibration mode..."));
-  #ifndef MOCK_MODE
-    HX711 scale;
-    switch(scaleNum) {
-      case 1:
-        scale = scale1;
-        break;
-      case 2:
-        scale = scale2;
-        break;
-      case 3:
-        scale = scale3;
-        break;
-      case 4:
-        scale = scale4;
-        break;
-      default:
-         safeWrite(F("ERROR: Bad Scale: "), scaleNum);
-         Timer1.start();
-         return;
-    }
-    scale.set_scale();
-    scale.tare(); //Reset the scale to 0
-    long zero_factor = scale.read_average(); //Get a baseline reading
-  #else
-    long zero_factor = 0;
-  #endif
+#ifndef MOCK_MODE
+  HX711 scale;
+  switch(scaleNum) {
+    case 1:
+      scale = scale1;
+      break;
+    case 2:
+      scale = scale2;
+      break;
+    case 3:
+      scale = scale3;
+      break;
+    case 4:
+      scale = scale4;
+      break;
+    default:
+       safeWrite(F("ERROR: Bad Scale: "), scaleNum);
+       Timer1.start();
+       return;
+  }
+  scale.set_scale();
+  scale.tare();
+  long zero_factor = scale.read_average();
+#else
+  long zero_factor = 0;
+#endif
   calibrationDataWrite(F("Zero Factor = "), zero_factor);
   delay(1000);
-  char* answer = prompt(F("Place known weight of (kg) "), kg);
+  char* answer = prompt(F("Place known weight on scale. Enter weight (in kg) and click OK."));
   
-  if (strcmp(answer, "OK") != 0) {
-    if (strcmp(answer, "CANCEL") != 0) {
-      safeWrite(F("ERROR: Bad answer: "), answer);
-    }
+  if (strcmp(answer, "CANCEL") == 0) {
     calibrationWrite(F("Calibration canceled."));
     Timer1.start();
     return;
   }
-  #ifndef MOCK_MODE
-    float targetKg = atof(kg);
-    scale.set_scale(getCalibrationValue(scaleNum));
-    float currentReading = scale.get_units();
-    while (currentReading != targetKg) {
-      float newVal;
-      if (currentReading < 0) {
-        newVal = getCalibrationValue(scaleNum) * -1.00;
+  float targetKg = atof(answer);
+  calibrationDataWrite(F("Calibration grams = "), targetKg * 1000);
+  
+#ifndef MOCK_MODE
+  scale.set_scale(getCalibrationValue(scaleNum));
+  float currentReading = scale.get_units();
+  while (currentReading != targetKg) {
+    float newVal;
+    if (currentReading < 0) {
+      newVal = getCalibrationValue(scaleNum) * -1.00;
+    } else {
+      if (currentReading < targetKg) {
+        newVal = getCalibrationValue(scaleNum) + 10;
       } else {
-        if (currentReading < targetKg) {
-          newVal = getCalibrationValue(scaleNum) + 10;
-        } else {
-          newVal = getCalibrationValue(scaleNum) - 10;
-        }
+        newVal = getCalibrationValue(scaleNum) - 10;
       }
-      setCalibrationValue(scaleNum, newVal);
-      scale.set_scale(newVal);
-      currentReading = scale.get_units();
     }
-  #endif
+    setCalibrationValue(scaleNum, newVal);
+    scale.set_scale(newVal);
+    currentReading = scale.get_units();
+  }
+#else
+  delay(2000);
+#endif
   calibrationWrite(F("Calibration complete."));
   Timer1.start();
 }
@@ -340,130 +476,23 @@ void setCalibrationValue(int scaleNum, float newValue) {
       scale4_calibration_factor = newValue;
       break;
   }
+#ifndef MOCK_MODE
+  saveCalibrationSettingsToSd();
+#endif
 }
 
-void report(void) {
-  // Reading temperature or humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  #ifndef MOCK_MODE
-    float h = dht.readHumidity();
-    // Read temperature as Celsius
-    float t = dht.readTemperature();
-  #else
-    float h = 15.123;
-    float t = 42.536;
-  #endif
-  
-  // Check if any reads failed and exit early (to try again).
-  if (isnan(h) || isnan(t)) {
-    Serial.println(F("ERROR: Failed to read from DHT sensor!"));
-    return;
-  }
-
-  if (t > maxTemp) {
-    heaterPowerOn = false;
-    #ifndef MOCK_MODE
-      digitalWrite(HEATER, LOW);
-      lcd.noBacklight();
-    #endif
-  } else {
-    if (h > maxHumidity) {
-      heaterPowerOn = true;
-      #ifndef MOCK_MODE
-        digitalWrite(HEATER, HIGH);
-        lcd.backlight();
-      #endif
-    }
-  }
-  
-  #ifndef MOCK_MODE
-    float w1 = scale1.get_units();
-    float w2 = scale2.get_units();
-    float w3 = scale3.get_units();
-    float w4 = scale4.get_units();
-      
-    l1 += encoder1->getValue();
-    l2 += encoder2->getValue();
-    l3 += encoder3->getValue();
-    l4 += encoder4->getValue();
-  #endif
-
-  // Report to Serial
-  writingToSerial = true;
-  Serial.print(F("H:"));
-  Serial.print(h);
-  Serial.print(F("% T:"));
-  Serial.print(t);
-  Serial.print(F("C S1:"));
-  Serial.print(w1);
-  Serial.print(F("kg S2:"));
-  Serial.print(w2);
-  Serial.print(F("kg S3:"));
-  Serial.print(w3);
-  Serial.print(F("kg S4:"));
-  Serial.print(w4);
-  Serial.print(F("kg L1:"));
-  Serial.print(l1);
-  Serial.print(F("mm L2:"));
-  Serial.print(l2);
-  Serial.print(F("mm L3:"));
-  Serial.print(l3);
-  Serial.print(F("mm L4:"));
-  Serial.print(l4);
-  Serial.print(F("mm P:"));
-  if (heaterPowerOn) {
-    Serial.println(F("ON"));
-  } else {
-    Serial.println(F("OFF"));
-  }
-  writingToSerial = false;
-
-  #ifndef MOCK_MODE
-    // update LCD
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("Humidity: "));
-    lcd.print(h);
-    lcd.print(F("%"));
-    lcd.setCursor(0, 1);
-    lcd.print(F("Temp: "));
-    lcd.print(t);
-    lcd.print(F(" C"));
-    lcd.setCursor(0, 2);
-    if (toggle) {
-      lcd.print(F("Spool 1: "));
-      lcd.print(w1);
-      lcd.print(F("kg"));
-      lcd.setCursor(0, 3);
-      lcd.print(F("Spool 2: "));
-      lcd.print(w2);
-      lcd.print(F("kg"));
-    } else {
-      lcd.print(F("Spool 3: "));
-      lcd.print(w3);
-      lcd.print(F("kg"));
-      lcd.setCursor(0, 3);
-      lcd.print(F("Spool 4: "));
-      lcd.print(w4);
-      lcd.print(F("kg"));
-    }
-  #endif
-  toggle = !toggle;
-}
-
-char* prompt(const __FlashStringHelper* msg, char* data) {
+char* prompt(const __FlashStringHelper* msg) {
   writingToSerial = true;
   Serial.print(F("PROMPT:"));
-  Serial.print(msg);
-  Serial.println(data);
+  Serial.println(msg);
   writingToSerial = false;
   
   while (true) {
     if (Serial.available() > 0) {
-      char input[COMMAND_MAX_SIZE + 1];
-      byte size = Serial.readBytes(input, COMMAND_MAX_SIZE);
+      char input[RESPONSE_MAX_SIZE + 1];
+      byte size = Serial.readBytes(input, RESPONSE_MAX_SIZE);
       input[size] = 0;
-      return strtok(input, " ");
+      return strtok(input, "\n"); // prevents returning the newline with the response, which happens with some clients.
     }
     delay(10);
   }
@@ -509,3 +538,44 @@ void safeWrite(const __FlashStringHelper* msg, char* data) {
   Serial.println(data);
   writingToSerial = false;
 }
+
+
+#ifndef MOCK_MODE
+  void saveCalibrationSettingsToSd() {
+    File file = SD.open(SETTINGS_FILENAME, FILE_WRITE);
+    if (file) {
+      file.print(scale1_calibration_factor);
+      file.print(F(" "));
+      file.print(scale2_calibration_factor);
+      file.print(F(" "));
+      file.print(scale3_calibration_factor);
+      file.print(F(" "));
+      file.print(scale4_calibration_factor);
+  
+      file.close();
+    } else {
+      safeWrite(F("ERROR: Could not open file for writing: "), SETTINGS_FILENAME);
+    }
+  }
+  
+  void loadCalibrationSettingsFromSd() {
+    File file = SD.open(SETTINGS_FILENAME);
+    String contents = "";
+    if (file) {
+      while (file.available()) {
+        contents += (char) file.read();
+      }
+      file.close();
+      char* setting = strtok(contents.c_str(), " ");
+      scale1_calibration_factor = atof(setting);
+      setting = strtok(0, " ");
+      scale2_calibration_factor = atof(setting);
+      setting = strtok(0, " ");
+      scale3_calibration_factor = atof(setting);
+      setting = strtok(0, " ");
+      scale4_calibration_factor = atof(setting);
+    } else {
+      safeWrite(F("ERROR: Could not open file for reading: "), SETTINGS_FILENAME);
+    }
+  }
+#endif
