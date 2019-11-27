@@ -457,9 +457,9 @@ void calibrate(int scaleNum) {
   }
 #else
   delay(2000);
-  calibrationWrite(F("Calibration complete."));
-  Timer1.start();
 #endif
+  calibrationWrite(F("Target matched. Calibration complete."));
+  Timer1.start();
 }
 
 float getCalibrationValue(int scaleNum) {
