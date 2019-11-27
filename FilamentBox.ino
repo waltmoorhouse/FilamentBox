@@ -86,10 +86,10 @@ const char * SETTINGS_FILENAME = "settings.dat";
 int maxHumidity = 5;
 int maxTemp = 80;
 
-float scale1_calibration_factor = -700;
-float scale2_calibration_factor = -700;
-float scale3_calibration_factor = -700;
-float scale4_calibration_factor = -700;
+float scale1_calibration_factor = -421000;
+float scale2_calibration_factor = -421000;
+float scale3_calibration_factor = -421000;
+float scale4_calibration_factor = -421000;
 
 #ifndef MOCK_MODE
   float l1 = 0.00;
@@ -161,8 +161,9 @@ void setup() {
     Timer3.initialize(1000);
     Timer3.attachInterrupt(timerIsr); 
 #endif
-  Serial.println("Waiting on Sensors to warm up before beginning...");
+  Serial.println(F("Waiting on Sensors to warm up before beginning..."));
   delay(10000);
+  Serial.println(F("Sensors ready."));
   Timer1.initialize(60000000/READINGS_PER_MINUTE);
   Timer1.attachInterrupt(report);
 }
@@ -264,6 +265,7 @@ void loop() {
       }
     }
   }
+  delay(50);
 }
 
 void report(void) {
@@ -272,14 +274,14 @@ void report(void) {
 #endif
   // Reading temperature or humidity takes about 250 milliseconds!
   // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  #ifndef MOCK_MODE
+#ifndef MOCK_MODE
     float h = dht.readHumidity();
     // Read temperature as Celsius
     float t = dht.readTemperature();
-  #else
+#else
     float h = 15.123;
     float t = 42.536;
-  #endif
+#endif
   
   // Check if any reads failed and exit early (to try again).
   if (isnan(h) || isnan(t)) {
@@ -411,42 +413,56 @@ void calibrate(int scaleNum) {
 #endif
   calibrationDataWrite(F("Zero Factor = "), zero_factor);
   delay(1000);
-  char* answer = prompt(F("Place known weight on scale. Enter weight (in kg) and click OK."));
-  
-  if (strcmp(answer, "CANCEL") == 0) {
+  String answer = prompt(String(F("Place known weight on scale. Enter weight (in kg) and click OK.")));
+
+#ifdef DEBUG_MODE
+  Serial.print(F("DEBUG: String answer="));
+  Serial.println(answer);
+#endif
+  if (strcmp(answer.c_str(), "CANCEL") == 0) {
     calibrationWrite(F("Calibration canceled."));
     Timer1.start();
     return;
   }
-  float targetKg = atof(answer);
+  float targetKg = atof(answer.c_str());
   calibrationDataWrite(F("Calibration grams = "), targetKg * 1000);
   
 #ifndef MOCK_MODE
-  scale.set_scale(getCalibrationValue(scaleNum));
+  float currentCalibrationFactor = getCalibrationValue(scaleNum);
+  scale.set_scale(currentCalibrationFactor);
   float currentReading = scale.get_units();
   while (currentReading != targetKg) {
-    float newVal;
-    if (currentReading < 0) {
-      newVal = getCalibrationValue(scaleNum) * -1.00;
+    String promptMsg(F("Enter new Calibration value and click OK. Current reading is "));
+    promptMsg += String(currentReading, 4);
+    promptMsg += '/';
+    promptMsg += String(targetKg, 4);
+    promptMsg += String(F(" Current Calibration Value is "));
+    promptMsg += String(currentCalibrationFactor);
+    answer = prompt(promptMsg);
+    
+    if (strcmp(answer.c_str(), "CANCEL") == 0) {
+      calibrationWrite(F("Calibration canceled."));
+      Timer1.start();
+      return;
+    } else if (strcmp(answer.c_str(), "ACCEPT") == 0) {
+      setCalibrationValue(scaleNum, currentCalibrationFactor);
+      calibrationWrite(F("Calibration complete."));
+      Timer1.start();
+      return;
     } else {
-      if (currentReading < targetKg) {
-        newVal = getCalibrationValue(scaleNum) + 10;
-      } else {
-        newVal = getCalibrationValue(scaleNum) - 10;
-      }
+      currentCalibrationFactor = atof(answer.c_str());
+      scale.set_scale(currentCalibrationFactor);
+      currentReading = scale.get_units();
     }
-    setCalibrationValue(scaleNum, newVal);
-    scale.set_scale(newVal);
-    currentReading = scale.get_units();
   }
 #else
   delay(2000);
 #endif
-  calibrationWrite(F("Calibration complete."));
+  calibrationWrite(F("Target matched. Calibration complete."));
   Timer1.start();
 }
 
-long getCalibrationValue(int scaleNum) {
+float getCalibrationValue(int scaleNum) {
   switch(scaleNum) {
     case 1:
       return scale1_calibration_factor;
@@ -481,7 +497,7 @@ void setCalibrationValue(int scaleNum, float newValue) {
 #endif
 }
 
-char* prompt(const __FlashStringHelper* msg) {
+String prompt(String msg) {
   writingToSerial = true;
   Serial.print(F("PROMPT:"));
   Serial.println(msg);
@@ -492,7 +508,11 @@ char* prompt(const __FlashStringHelper* msg) {
       char input[RESPONSE_MAX_SIZE + 1];
       byte size = Serial.readBytes(input, RESPONSE_MAX_SIZE);
       input[size] = 0;
-      return strtok(input, "\n"); // prevents returning the newline with the response, which happens with some clients.
+#ifdef DEBUG_MODE
+      Serial.print(F("DEBUG: input[]="));
+      Serial.println(input);
+#endif
+      return String(input);
     }
     delay(10);
   }
@@ -538,7 +558,6 @@ void safeWrite(const __FlashStringHelper* msg, char* data) {
   Serial.println(data);
   writingToSerial = false;
 }
-
 
 #ifndef MOCK_MODE
   void saveCalibrationSettingsToSd() {
