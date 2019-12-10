@@ -9,6 +9,8 @@
 // #define MOCK_MODE true
 // #define DEBUG_MODE true
 
+//#define CHECK_TOLERANCE true
+
 #define COMMAND_MAX_SIZE 25
 #define RESPONSE_MAX_SIZE 10
 
@@ -17,11 +19,21 @@
   #include <DHT.h>
   #include <DHT_U.h>
   #include <HX711.h>
-  #include <LiquidCrystal_I2C.h>
   #include <SD.h>
   #include <SPI.h>
   #include <TimerThree.h>
   #include <Wire.h>
+  
+  // Arducam OLED display
+  #include "ArducamSSD1306.h"    // Modification of Adafruit_SSD1306 for ESP8266 compatibility
+  #include "Adafruit_GFX.h"   // Needs a little change in original Adafruit library
+  
+  #define OLED_RESET         16  // Pin 15 -RESET digital signal
+  #define LOGO16_GLCD_HEIGHT 16
+  #define LOGO16_GLCD_WIDTH  16
+  
+  ArducamSSD1306 display(OLED_RESET); // FOR I2C
+  // Arducam OLED display
 
   #define DHTTYPE       DHT22
   
@@ -42,29 +54,32 @@
   
   #define ROT1_DT       A0
   #define ROT1_CLK      A1
-  #define ROT1_SW       20
+  #define ROT1_SW       22
   
   #define ROT2_DT       A2
   #define ROT2_CLK      A3
-  #define ROT2_SW       22
+  #define ROT2_SW       24
   
   #define ROT3_DT       A6
   #define ROT3_CLK      A7
-  #define ROT3_SW       24
+  #define ROT3_SW       26
   
   #define ROT4_DT       A8
   #define ROT4_CLK      A9
-  #define ROT4_SW       26
+  #define ROT4_SW       28
   
-  #define LCD_SDA       A4
-  #define LCD_SCL       A5
-  #define LCD_LINES     4
-  #define LCD_CHARS     20
+  #define LCD_SDA       20
+  #define LCD_SCL       21
 
   #define SD_MISO       50
   #define SD_MOSI       51
   #define SD_SCLK       52
   #define SD_CS         53
+
+  #define SLIDE_POT1    A10
+  #define SLIDE_POT2    A11
+  #define SLIDE_POT3    A12
+  #define SLIDE_POT4    A13
 
   HX711 scale1;
   HX711 scale2;
@@ -77,14 +92,26 @@
   ClickEncoder *encoder4;
   
   DHT dht(DHTPIN, DHTTYPE);
-  LiquidCrystal_I2C lcd(0x27, LCD_CHARS, LCD_LINES);
 
 #endif
 
 const int READINGS_PER_MINUTE = 10;
+const char * CALIBRATION_FILENAME = "calibration.dat";
 const char * SETTINGS_FILENAME = "settings.dat";
 int maxHumidity = 5;
 int maxTemp = 80;
+int toleranceMin1 = 256;
+int toleranceMax1 = 768;
+int toleranceMin2 = 256;
+int toleranceMax2 = 768;
+int toleranceMin3 = 256;
+int toleranceMax3 = 768;
+int toleranceMin4 = 256;
+int toleranceMax4 = 768;
+bool out_of_tolerance1 = false;
+bool out_of_tolerance2 = false;
+bool out_of_tolerance3 = false;
+bool out_of_tolerance4 = false;
 
 float scale1_calibration_factor = -421000;
 float scale2_calibration_factor = -421000;
@@ -96,6 +123,11 @@ float scale4_calibration_factor = -421000;
   float l2 = 0.00;
   float l3 = 0.00;
   float l4 = 0.00;
+ 
+  int pot1 = -1;
+  int pot2 = -1;
+  int pot3 = -1;
+  int pot4 = -1;
 #else
   float w1 = 1.23;
   float w2 = 2.34;
@@ -106,10 +138,14 @@ float scale4_calibration_factor = -421000;
   float l2 = 50.34;
   float l3 = 75.56;
   float l4 = 150.78;
+ 
+  int pot1 = 512;
+  int pot2 = 498;
+  int pot3 = 750;
+  int pot4 = 512;
 #endif
 
 bool heaterPowerOn = true;
-bool toggle = true;
 bool writingToSerial = false;
 
 #ifndef MOCK_MODE
@@ -125,12 +161,28 @@ void setup() {
   Serial.begin(115200);
 
 #ifndef MOCK_MODE
+    display.begin();
+    display.setTextColor(WHITE);
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(0,0);
+    display.println(F("Booting..."));
+    display.setTextSize(1);
+    display.setCursor(20, 40);
+    display.println(F("Please Wait..."));
+    display.display();
+
     if (!SD.begin(SD_CS)) {
       Serial.println(F("ERROR: Could not initialize SD Card!"));
     }
     loadCalibrationSettingsFromSd();
   
     pinMode(HEATER, OUTPUT);
+    pinMode(SLIDE_POT1, INPUT);
+    pinMode(SLIDE_POT2, INPUT);
+    pinMode(SLIDE_POT3, INPUT);
+    pinMode(SLIDE_POT4, INPUT);
+    
     dht.begin();
     
     scale1.begin(SCALE1_DOUT, SCALE1_CLK);
@@ -161,32 +213,79 @@ void setup() {
     Timer3.initialize(1000);
     Timer3.attachInterrupt(timerIsr); 
 #endif
-  Serial.println(F("Waiting on Sensors to warm up before beginning..."));
+  Serial.println(F("INFO:Waiting on Sensors to warm up before beginning..."));
   delay(10000);
-  Serial.println(F("Sensors ready."));
+  Serial.println(F("INFO:Sensors ready."));
   Timer1.initialize(60000000/READINGS_PER_MINUTE);
   Timer1.attachInterrupt(report);
 }
 
 void loop() {
 #ifndef MOCK_MODE  
-    l1 += encoder1->getValue();
-    l2 += encoder2->getValue();
-    l3 += encoder3->getValue();
-    l4 += encoder4->getValue();
+  #ifdef CHECK_TOLERANCE
+    pot1 = analogRead(SLIDE_POT1);
+    if (pot1 < toleranceMin1) {
+      Serial.println(F("TOLERANCE: Sensor 1 below Minimum!"));
+      out_of_tolerance1 = true;
+    } else if (pot1 > toleranceMax1) {
+      Serial.println(F("TOLERANCE: Sensor 1 above Maximum!"));
+      out_of_tolerance1 = true;
+    } else {
+      out_of_tolerance1 = false;
+    }
     
+    pot2 = analogRead(SLIDE_POT2);
+    if (pot2 < toleranceMin2) {
+      Serial.println(F("TOLERANCE: Sensor 2 below Minimum!"));
+      out_of_tolerance2 = true;
+    } else if (pot2 > toleranceMax2) {
+      Serial.println(F("TOLERANCE: Sensor 2 above Maximum!"));
+      out_of_tolerance2 = true;
+    } else {
+      out_of_tolerance2 = false;
+    }
+    
+    pot3 = analogRead(SLIDE_POT3);
+    if (pot3 < toleranceMin3) {
+      Serial.println(F("TOLERANCE: Sensor 3 below Minimum!"));
+      out_of_tolerance3 = true;
+    } else if (pot3 > toleranceMax3) {
+      Serial.println(F("TOLERANCE: Sensor 3 above Maximum!"));
+      out_of_tolerance3 = true;
+    } else {
+      out_of_tolerance3 = false;
+    }
+    
+    pot4 = analogRead(SLIDE_POT4);
+    if (pot4 < toleranceMin4) {
+      Serial.println(F("TOLERANCE: Sensor 4 below Minimum!"));
+      out_of_tolerance4 = true;
+    } else if (pot4 > toleranceMax4) {
+      Serial.println(F("TOLERANCE: Sensor 4 above Maximum!"));
+      out_of_tolerance4 = true;
+    } else {
+      out_of_tolerance4 = false;
+    }
+  #endif
+    l1 += encoder1->getValue();
     ClickEncoder::Button b1 = encoder1->getButton();
     if (b1 == ClickEncoder::DoubleClicked) {
       l1 = 0.00;
     }
+    
+    l2 += encoder2->getValue();
     ClickEncoder::Button b2 = encoder2->getButton();
     if (b2 == ClickEncoder::DoubleClicked) {
       l2 = 0.00;
     }
+    
+    l3 += encoder3->getValue();
     ClickEncoder::Button b3 = encoder3->getButton();
     if (b3 == ClickEncoder::DoubleClicked) {
       l3 = 0.00;
     }
+    
+    l4 += encoder4->getValue();
     ClickEncoder::Button b4 = encoder4->getButton();
     if (b4 == ClickEncoder::DoubleClicked) {
       l4 = 0.00;
@@ -212,13 +311,35 @@ void loop() {
           char* setting = command;
           ++separator;
           int newValue = atoi(separator);
-          
+          bool badSetting = false;
           if  (strcmp(setting, "T") == 0) {
             maxTemp = newValue;
           } else if  (strcmp(setting, "H") == 0) {
             maxHumidity = newValue;
+          } else if  (strcmp(setting, "TOL-MIN1") == 0) {
+            toleranceMin1 = newValue;
+          } else if  (strcmp(setting, "TOL-MAX1") == 0) {
+            toleranceMax1 = newValue;
+          } else if  (strcmp(setting, "TOL-MIN2") == 0) {
+            toleranceMin2 = newValue;
+          } else if  (strcmp(setting, "TOL-MAX2") == 0) {
+            toleranceMax2 = newValue;
+          } else if  (strcmp(setting, "TOL-MIN3") == 0) {
+            toleranceMin3 = newValue;
+          } else if  (strcmp(setting, "TOL-MAX3") == 0) {
+            toleranceMax3 = newValue;
+          } else if  (strcmp(setting, "TOL-MIN4") == 0) {
+            toleranceMin4 = newValue;
+          } else if  (strcmp(setting, "TOL-MAX4") == 0) {
+            toleranceMax4 = newValue;
           } else {
             safeWrite(F("ERROR: Bad Setting: "), setting);
+            badSetting = true;
+          }
+          if (!badSetting) {
+#ifndef MOCK_MODE
+            
+#endif
           }
         }
       } else if (strcmp(command, "TARE") == 0) {
@@ -265,7 +386,7 @@ void loop() {
       }
     }
   }
-  delay(50);
+  delay(25);
 }
 
 void report(void) {
@@ -293,14 +414,12 @@ void report(void) {
     heaterPowerOn = false;
     #ifndef MOCK_MODE
       digitalWrite(HEATER, HIGH);
-      lcd.noBacklight();
     #endif
   } else {
     if (h > maxHumidity) {
       heaterPowerOn = true;
       #ifndef MOCK_MODE
         digitalWrite(HEATER, LOW);
-        lcd.backlight();
       #endif
     }
   }
@@ -346,36 +465,70 @@ void report(void) {
   writingToSerial = false;
 
 #ifndef MOCK_MODE
-    // update LCD
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("Humidity: "));
-    lcd.print(h);
-    lcd.print(F("%"));
-    lcd.setCursor(0, 1);
-    lcd.print(F("Temp: "));
-    lcd.print(t);
-    lcd.print(F(" C"));
-    lcd.setCursor(0, 2);
-    if (toggle) {
-      lcd.print(F("Spool 1: "));
-      lcd.print(w1);
-      lcd.print(F("kg"));
-      lcd.setCursor(0, 3);
-      lcd.print(F("Spool 2: "));
-      lcd.print(w2);
-      lcd.print(F("kg"));
-    } else {
-      lcd.print(F("Spool 3: "));
-      lcd.print(w3);
-      lcd.print(F("kg"));
-      lcd.setCursor(0, 3);
-      lcd.print(F("Spool 4: "));
-      lcd.print(w4);
-      lcd.print(F("kg"));
-    }
+  // update LCD
+  display.clearDisplay();
+  
+  display.setTextSize(2);
+  display.setCursor(0,0);
+  display.print(h, 1);
+  display.print(F("%"));
+  display.print(t, 1);
+  display.println(F("C"));
+  
+  display.setTextSize(1);
+  display.setCursor(0, 16);
+  if (out_of_tolerance1) {
+    display.print(F("1! "));
+  } else {
+    display.print(F("1  "));
+  }
+  display.print(w1);
+  display.print(F("kg "));
+  display.print(l1, 1);
+  display.print(F("mm"));
+  
+  display.setCursor(0, 26);
+  if (out_of_tolerance2) {
+    display.print(F("2! "));
+  } else {
+    display.print(F("2  "));
+  }
+  display.print(w2);
+  display.print(F("kg "));
+  display.print(l2, 1);
+  display.print(F("mm"));
+  
+  display.setCursor(0, 36);
+  if (out_of_tolerance3) {
+    display.print(F("3! "));
+  } else {
+    display.print(F("3  "));
+  }
+  display.print(w3);
+  display.print(F("kg "));
+  display.print(l3, 1);
+  display.print(F("mm"));
+  
+  display.setCursor(0, 46);
+  if (out_of_tolerance4) {
+    display.print(F("4! "));
+  } else {
+    display.print(F("4  "));
+  }
+  display.print(w4);
+  display.print(F("kg "));
+  display.print(l4, 1);
+  display.print(F("mm"));
+
+  display.setCursor(15, 56);
+  if (heaterPowerOn) {
+    display.println(F("Heater Power:  ON"));
+  } else {
+    display.println(F("Heater Power: OFF"));
+  }
+  
+  display.display();
 #endif
-  toggle = !toggle;
   
 #ifdef DEBUG_MODE
   Serial.println(F("DEBUG: End report"));
@@ -386,6 +539,15 @@ void calibrate(int scaleNum) {
   Timer1.stop();
   calibrationWrite(F("Entering calibration mode..."));
 #ifndef MOCK_MODE
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0,0);
+  display.println(F("Calibrate"));
+  display.print(F("Scale "));
+  display.println(scaleNum);
+  display.display();
+
   HX711 scale;
   switch(scaleNum) {
     case 1:
@@ -561,7 +723,7 @@ void safeWrite(const __FlashStringHelper* msg, char* data) {
 
 #ifndef MOCK_MODE
   void saveCalibrationSettingsToSd() {
-    File file = SD.open(SETTINGS_FILENAME, FILE_WRITE);
+    File file = SD.open(CALIBRATION_FILENAME, FILE_WRITE);
     if (file) {
       file.print(scale1_calibration_factor);
       file.print(F(" "));
@@ -573,12 +735,12 @@ void safeWrite(const __FlashStringHelper* msg, char* data) {
   
       file.close();
     } else {
-      safeWrite(F("ERROR: Could not open file for writing: "), SETTINGS_FILENAME);
+      safeWrite(F("ERROR: Could not open file for writing: "), CALIBRATION_FILENAME);
     }
   }
   
   void loadCalibrationSettingsFromSd() {
-    File file = SD.open(SETTINGS_FILENAME);
+    File file = SD.open(CALIBRATION_FILENAME);
     String contents = "";
     if (file) {
       while (file.available()) {
@@ -594,7 +756,25 @@ void safeWrite(const __FlashStringHelper* msg, char* data) {
       setting = strtok(0, " ");
       scale4_calibration_factor = atof(setting);
     } else {
-      safeWrite(F("ERROR: Could not open file for reading: "), SETTINGS_FILENAME);
+      safeWrite(F("ERROR: Could not open file for reading: "), CALIBRATION_FILENAME);
+    }
+  }
+
+  void saveSettingToSd(const __FlashStringHelper* msg, char* data) {
+    
+    File file = SD.open(SETTINGS_FILENAME, FILE_WRITE);
+    if (file) {
+      file.print(scale1_calibration_factor);
+      file.print(F(" "));
+      file.print(scale2_calibration_factor);
+      file.print(F(" "));
+      file.print(scale3_calibration_factor);
+      file.print(F(" "));
+      file.print(scale4_calibration_factor);
+  
+      file.close();
+    } else {
+      safeWrite(F("ERROR: Could not open file for writing: "), SETTINGS_FILENAME);
     }
   }
 #endif
