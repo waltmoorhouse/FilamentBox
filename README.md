@@ -31,7 +31,7 @@ Connect the Mega to your computer via USB and upload the .ino file to it.
 Open the Serial Monitor and watch the messages.  The OLED should say Booting... Please wait... 
 After about 10-15 seconds you should see the temp and humidity in yellow at the top, and the spool measurments below in blue.
 If you see this and the serial monitor is getting a string of values every 3 seconds, you are ready to disconnect from the serial monitor and connect to your OctoPrint server.  
-Install the OctoPrint Plugin and restart. It should connect automatically and add a new tab to the GUI.  
+Install the [OctoPrint Plugin](https://github.com/waltmoorhouse/OctoPrint-Filamentstorage) and restart. It should connect automatically and add a new tab to the GUI.  
 
 ## Notes
 
